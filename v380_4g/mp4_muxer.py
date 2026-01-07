@@ -18,13 +18,15 @@ class MP4Muxer:
     """Mux H.265 video and optional AAC audio into MP4 container"""
 
     def __init__(self, video_path: str, audio_path: Optional[str] = None,
-                 fps: float = 25.0, audio_sample_rate: int = 8000):
+                 fps: float = None, audio_sample_rate: int = 8000,
+                 duration_seconds: float = None):
         self.video_path = video_path
         self.audio_path = audio_path
-        self.fps = fps
+        self.fps = fps  # Will be auto-detected if None and duration_seconds provided
         self.audio_sample_rate = audio_sample_rate
-        self.timescale = 1200
-        self.frame_duration = int(self.timescale / fps)
+        self.duration_seconds = duration_seconds  # For auto-FPS detection
+        self.timescale = 1200  # Video timescale
+        self.frame_duration = None  # Calculated after FPS is determined
 
     def mux(self, output_path: str) -> bool:
         """Mux video (and audio) into MP4 file"""
@@ -39,6 +41,25 @@ class MP4Muxer:
                 print(f"[*] Parsing AAC audio: {self.audio_path}")
                 audio_samples, asc = self._parse_aac()
                 print(f"    Found {len(audio_samples)} audio frames")
+
+            # Auto-detect FPS if not specified but duration is provided
+            if self.fps is None:
+                if self.duration_seconds and self.duration_seconds > 0 and len(video_samples) > 0:
+                    calculated_fps = len(video_samples) / self.duration_seconds
+                    # Sanity check: typical camera FPS is 10-30, use it if reasonable
+                    if 8 <= calculated_fps <= 30:
+                        self.fps = calculated_fps
+                        print(f"    Auto-detected FPS: {self.fps:.2f} ({len(video_samples)} frames / {self.duration_seconds:.1f}s)")
+                    else:
+                        # Calculated FPS is unreasonable (partial download?), use default
+                        self.fps = 12.5
+                        print(f"    Calculated FPS {calculated_fps:.2f} out of range, using default: {self.fps}")
+                else:
+                    self.fps = 12.5  # Default fallback for V380 cameras
+                    print(f"    Using default FPS: {self.fps}")
+
+            # Calculate frame_duration now that FPS is determined
+            self.frame_duration = int(self.timescale / self.fps)
 
             print(f"[*] Building MP4 container...")
 
@@ -251,7 +272,7 @@ class MP4Muxer:
         """Build ftyp (file type) box"""
         data = b'isom'
         data += struct.pack('>I', 512)
-        data += b'isom' + b'iso2' + b'mp41' + b'hev1'
+        data += b'isom' + b'iso2' + b'mp41'
         return self._build_box(b'ftyp', data)
 
     def _build_moov(self, video_sizes, video_offsets, vps, sps, pps, width, height,
@@ -437,9 +458,9 @@ class MP4Muxer:
         hev1_data.extend(struct.pack('>h', -1))
         hev1_data.extend(hvcc)
 
-        hev1 = self._build_box(b'hev1', bytes(hev1_data))
+        hvc1 = self._build_box(b'hvc1', bytes(hev1_data))
 
-        stsd_data = struct.pack('>I', 0) + struct.pack('>I', 1) + hev1
+        stsd_data = struct.pack('>I', 0) + struct.pack('>I', 1) + hvc1
         return self._build_box(b'stsd', stsd_data)
 
     def _build_hvcc(self, vps, sps, pps) -> bytes:
